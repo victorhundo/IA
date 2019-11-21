@@ -1,6 +1,9 @@
 package IA;
+import org.apache.bcel.Const;
 import org.apache.commons.math3.*;
 import org.apache.commons.math3.distribution.EnumeratedIntegerDistribution;
+import com.google.common.collect.HashBasedTable;
+import com.google.common.collect.Table;
 import robocode.*;
 import org.apache.commons.math3.*;
 import robocode.Robot;
@@ -15,81 +18,204 @@ import java.util.prefs.Preferences;
 /**
  * HAL9001 - a robot by (your name here)
  */
-public class HAL9001 extends Robot
+public class HAL9001 extends AdvancedRobot
 {
     /**
      * run: HAL9001's default behavior
      */
-    private String[] states = new String[]{"gunR", "gunL", "ahead"};
-    private String[][] actions = new String[][]{
-            {"gunR-gunR", "gunR-gunL", "gunR-ahead"},
-            {"gunL-gunR", "gunL-gunL", "gunL-ahead"},
-            {"ahead-gunR", "ahead-gunL", "ahead-ahead"}};
-    private double[][] probMatrix = new double[][]{
-            {0.9, 0.075, 0.025},
-            {0.15, 0.8, 0.05},
-            {0.25, 0.25, 0.5}};
+    private GameStatus game;
+    private QLearning ql;
+    private Rewards rewards;
+    private boolean isOptimalPolicy;
+
+    public HAL9001(){
+        State.init();
+        this.ql = new QLearning();
+        this.rewards = new Rewards();
+        this.game = new GameStatus();
+        game.setAmIAlive(true);
+        game.setEnemyEnergy(100);
+        State.addInitial();
+        init();
+    }
+
+    private void init() {
+        initAheadAction();
+        initBackAction();
+        initTurnLeftAction();
+        initTurnRightAction();
+        ql.init();
+    }
 
     public void onPaint(Graphics2D g) {
-        // Set the paint color to red
-        g.setColor(java.awt.Color.RED);
-        // Paint a filled rectangle at (50,50) at size 100x150 pixels
-        g.fillRect(50, 50, 100, 150);
+        // Set the paint color to a red half transparent color
+        g.setColor(new Color(0xff, 0x00, 0x00, 0x80));
+
+        // Draw a line from our robot to the scanned robot
+        g.drawLine((int)game.getEnemyX(), (int)game.getEnemyY(), (int)game.getX(), (int)game.getY());
+
+        // Draw a filled square on top of the scanned robot that covers it
+        g.fillRect((int) game.getEnemyX() - 20, (int) game.getEnemyY() - 20, 40, 40);
+    }
+
+    private void turnRight() {
+        this.setTurnRight(Constants.TURN_ANGLE);
+        this.execute();
+        this.waitFor(new TurnCompleteCondition(this));
+    }
+
+    private void fire() {
+        this.setFire(Constants.FIRE_POWER);
+        this.execute();
+        this.waitFor(new TurnCompleteCondition(this));
+    }
+
+    private void turnLeft() {
+        this.setTurnLeft(Constants.TURN_ANGLE);
+        this.execute();
+        this.waitFor(new TurnCompleteCondition(this));
+    }
+
+    private void goBack() {
+        this.setBack(Constants.MOVE_DISTANCE);
+        this.execute();
+        this.waitFor(new MoveCompleteCondition(this));
+    }
+
+    private void goAhead() {
+        this.setAhead(Constants.MOVE_DISTANCE);
+        this.execute();
+        this.waitFor(new MoveCompleteCondition(this));
+    }
+
+    private void initTurnRightAction() {
+        Executable turnRightAction = () -> {
+            turnRight();
+        };
+        ql.setActionFunction(Action.TURN_RIGHT, turnRightAction);
+    }
+
+    private void initTurnLeftAction() {
+        Executable turnLeftAction = () -> {
+            turnLeft();
+        };
+        ql.setActionFunction(Action.TURN_LEFT, turnLeftAction);
+    }
+
+    private void initBackAction() {
+        Executable backAction = () -> {
+            goBack();
+        };
+        ql.setActionFunction(Action.BACK, backAction);
+    }
+
+
+    private void initAheadAction() {
+        Executable aheadAction = () -> {
+            goAhead();
+        };
+        ql.setActionFunction(Action.AHEAD, aheadAction);
     }
 
 
     public void run() {
-        String currentState = states[0];
-        String action = null;
+        // Gun, radar and tank movements are independent
+        setAdjustGunForRobotTurn(true);
+        setAdjustRadarForGunTurn(true);
+        setAdjustRadarForRobotTurn(true);
+        setTurnRadarRightRadians(Double.POSITIVE_INFINITY);
 
-        // Robot main loop
-        System.out.println(this.probMatrix.length);
+        this.updateIsOptimalPolicy();
         while(true) {
-            int[] indexes = new int[]{0,1,2};
+            State state = State.updateState(game, ql);
+            Action action = chooseAction(state);
+            action.execute();
+            this.livingReward();
+            this.distanceToEnemyReward();
 
-            if ( currentState.equals(states[0]) ){
-                EnumeratedIntegerDistribution dist = new EnumeratedIntegerDistribution(indexes, this.probMatrix[0]);
-                action = actions[0][dist.sample()];
+            // Prevents updating q-table after the end of the round.
+            if (game.isAmIAlive() == false || game.getMyEnergy() == 0)
+                break;
+            if (!isOptimalPolicy) {
+                State nextState = State.updateState(game, ql);
+                ql.updateQ(state, action, nextState, rewards);
             }
-
-            else if (currentState.equals(states[1])) {
-                EnumeratedIntegerDistribution dist = new EnumeratedIntegerDistribution(indexes, this.probMatrix[1]);
-                action = actions[1][dist.sample()];
-            }
-
-            else if (currentState.equals(states[2])) {
-
-                EnumeratedIntegerDistribution dist = new EnumeratedIntegerDistribution(indexes, this.probMatrix[2]);
-                action = actions[2][dist.sample()];
-            }
-
-            currentState = fAction(action);
+            rewards.endOfCycle();
+            game.resetDataAtTheEndOfCycle();
         }
     }
 
-    public String fAction(String action) {
-        String state = "";
-        if ( action.equals(this.actions[0][0]) || action.equals(this.actions[1][0]) || action.equals(this.actions[2][0]) ) {
-            turnGunRight(360);
-            state = this.states[0];
+    private Action chooseAction(State state) {
+        if (isOptimalPolicy) {
+            return ql.bestAction(state);
         }
-        else if (action.equals(this.actions[0][1]) || action.equals(this.actions[1][1]) || action.equals(this.actions[2][1])) {
-            turnGunLeft(360);
-            state = this.states[1];
+        return ql.nextAction(state, game.getRoundNum());
+    }
+
+    public void livingReward() {
+        rewards.addReward(RewardType.LIVING_REWARD);
+    }
+
+    private void distanceToEnemyReward() {
+        double tooClose = 50;
+        double close = 200;
+        if (game.getDistanceToEnemy() < tooClose) {
+            rewards.addReward(RewardType.DISTANCE_TO_ENEMY_LESS_THAN_50);
+        } else if (game.getDistanceToEnemy() < close) {
+            rewards.addReward(RewardType.DISTANCE_TO_ENEMY_LESS_THAN_200);
         }
-        else if (action.equals(this.actions[0][2]) || action.equals(this.actions[1][2]) || action.equals(this.actions[2][2])) {
-            ahead(100);
-            state = this.states[2];
-        }
-        return state;
-    };
+    }
+
+    public void onDeath(DeathEvent e) {
+//        LOG.info("Round ended");
+//        rewards.endOfRound();
+        game.setAmIAlive(false);
+    }
+
+    @Override
+    public void onRoundEnded(RoundEndedEvent event) {
+        super.onRoundEnded(event);
+        rewards.endOfRound();
+    }
+
 
     /**
      * onScannedRobot: What to do when you see another robot
      */
     public void onScannedRobot(ScannedRobotEvent e) {
+        setTurnRadarLeftRadians(getRadarTurnRemainingRadians());
+
+        // Update enemy energy
+        game.setEnemyEnergy(e.getEnergy());
+
+        // Update angle to enemy
+        game.setAngleToEnemy(e.getBearing());
+
+        // Calculate the angle to the scanned robot
+        double angle = Math.toRadians((game.getHeading() + game.getAngleToEnemy()) % 360);
+
+        // Calculate the coordinates of the robot
+        double tempEnemyX = (game.getX() + Math.sin(angle) * e.getDistance());
+        double tempEnemyY = (game.getY() + Math.cos(angle) * e.getDistance());
+
+        if (tempEnemyX != game.getEnemyX() || tempEnemyY != game.getEnemyY()) {
+            game.setEnemyX(tempEnemyX);
+            game.setEnemyY(tempEnemyY);
+        }
+
+        double absoluteBearing = getHeadingRadians() + e.getBearingRadians();
+        setTurnGunRightRadians(
+                robocode.util.Utils.normalRelativeAngle(absoluteBearing -
+                        getGunHeadingRadians()));
         // Replace the next line with any behavior you would like
-        fire(1);
+
+        if (getGunHeat() == 0) {
+            if (e.getDistance() < 50 && game.getMyEnergy() > 50 )
+                fire(3);
+                // otherwise, fire 1.
+            else
+                fire(1);
+        }
     }
 
     /**
@@ -97,7 +223,18 @@ public class HAL9001 extends Robot
      */
     public void onHitByBullet(HitByBulletEvent e) {
         // Replace the next line with any behavior you would like
-        back(10);
+        int baseValue = 0;
+        rewards.addReward(RewardType.HIT_BY_BULLET);
+    }
+
+    public void onHitRobot(HitRobotEvent e) {
+        // check if we kill a robot
+        double damage = game.getEnemyEnergy() - e.getEnergy();
+        if (e.getEnergy() <= 0) {
+            rewards.addReward(RewardType.COLLISION_AND_KILL_ENEMY);
+        } else {
+            rewards.addReward(RewardType.COLLISION_WITH_ENEMY);
+        }
     }
 
     /**
@@ -105,6 +242,38 @@ public class HAL9001 extends Robot
      */
     public void onHitWall(HitWallEvent e) {
         // Replace the next line with any behavior you would like
-        back(20);
+        rewards.addReward(RewardType.HIT_A_WALL);
+//        back(20);
+    }
+
+    public void onStatus(StatusEvent e) {
+        game.setRobotStatus(e.getStatus());
+        game.setBattlefieldHeight(this.getBattleFieldHeight());
+        game.setBattlefieldWidth(this.getBattleFieldWidth());
+    }
+
+    private void updateIsOptimalPolicy(){
+        if (game.getRoundNum() >= Constants.LEARNING_ROUNDS){
+            this.isOptimalPolicy = true;
+        } else {
+            this.isOptimalPolicy = false;
+        }
+    }
+
+    private void onActionEvent() {
+        State state = State.updateState(game, ql);
+        Action action = chooseAction(state);
+        action.execute();
+        this.livingReward();
+        this.distanceToEnemyReward();
+        // Prevents updating q-table after the end of the round.
+        if (game.isAmIAlive() == false || game.getMyEnergy() == 0)
+            return;
+        if (!isOptimalPolicy) {
+            State nextState = State.updateState(game, ql);
+            ql.updateQ(state, action, nextState, rewards);
+        }
+        rewards.endOfCycle();
+        game.resetDataAtTheEndOfCycle();
     }
 }

@@ -17,7 +17,7 @@
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="library" name="robocode" level="project" />
-    <orderEntry type="library" name="org.apache.commons.math" level="project" />
-    <orderEntry type="library" name="commons-math3-3.6.1" level="project" />
+    <orderEntry type="library" name="commons-math3-3.6.1-javadoc" level="project" />
+    <orderEntry type="library" name="com.google.guava-all-1.0.0.rc5" level="project" />
   </component>
 </module>
